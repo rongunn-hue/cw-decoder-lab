@@ -49,6 +49,9 @@ python3 apply_radio.py /tmp/base.wav /tmp/base_qsb.wav --cond qsb_deep
 Simulated suite character error rate: original 72.6% -> rev 1 41.8% (ignoring word spaces 67.3% -> 36.6%).
 Real machine-sent W1AW 20 wpm audio: 2.0% for both (no regression).
 
+The suite is split into speed tiers (nominal 15-25 wpm, slow 8-12, fast 30-40; see `docs/PROCEDURE.md`). Rev 1 vs original,
+all 9 conditions: nominal 30.8 % vs 48.9 %, slow 67.8 % vs 120.8 %, fast 25.4 % vs 33.5 %.
+
 Caveats: the suite is **simulated**. Its operator variances are partly assumptions (tagged in `handsim.py`
 as `[BELL]`/`[KOCH]`/`[PDP12]`/`[WEBER]`/`[ASSUMED]`), so use it for relative comparison, not as a prediction of
 real-world accuracy. No real hand-sent recordings with known text were available; contributions of such

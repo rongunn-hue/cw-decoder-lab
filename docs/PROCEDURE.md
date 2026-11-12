@@ -49,6 +49,37 @@ Conditions: `clean`, `snr15`, `snr6`, `snr0` (noise levels), `qsb_deep` (slow Ra
 fading), `qrm_adj` (adjacent station 120 Hz away), `qrn_crash` (static crashes), `agc_band` (band-pass + AGC).
 `--seed` changes the operator; the same options always give the same audio and result.
 
+## Speed tiers (full suite)
+The suite is split by sending speed so results at typical speeds are not blended with extremes:
+
+| Tier | Speeds (wpm) | Keys | Operators |
+|---|---|---|---|
+| `nominal` | 15, 18, 20, 22, 25 | straight, bug, paddle | 30 |
+| `slow` | 8, 10, 12 | all | 18 |
+| `fast` | 30, 35 (bug), 30, 35, 40 (paddle) | bug, paddle only | 10 |
+| `legacy` | 10, 18, 28 | all | 18 (the original set; default, kept so earlier results stay comparable) |
+
+Each operator is run under all 9 radio conditions. Pick tiers with `--tier nominal` (comma list or `all`):
+```
+python3 suite.py run --decoder "../decoder/cwdecode 5" --tier nominal --json nominal.json
+```
+The tier ranges are my choice of "typical" (about 15-25 wpm for conversation), from general amateur-radio practice, not a
+measured population. Straight key above 25 wpm is excluded as unrealistic (assumed).
+
+### Results by tier (all 9 conditions, Nov 2026 run, simulated; `results/tiers_all_*.json`)
+| Tier | Original decoder CER | Rev 1 CER |
+|---|---|---|
+| nominal (15-25 wpm) | 48.9 % | 30.8 % |
+| slow (8-12 wpm) | 120.8 % (more insertions than characters) | 67.8 % |
+| fast (30-40 wpm) | 33.5 % | 25.4 % |
+| legacy (10/18/28) | 72.6 % | 41.8 % |
+| all 684 cases | 69.3 % | 41.4 % |
+
+Nominal tier excluding the two conditions that fail for any speed (`qsb_fast`, `qrm_adj`), rev 1 by key: straight 26 %,
+bug 27 %, paddle 13 % (original: 51 / 43 / 17 %). Rev 1 by speed, nominal tier, all conditions: 15 wpm 38 %, 18 wpm 33 %,
+20 wpm 36 %, 22 wpm 22 %, 25 wpm 25 %: slower is worse, and the slow tier is poor, so low speeds remain the weak area.
+These are simulated, partly assumed operator variances; use for comparison, not as real-operator accuracy.
+
 ## Reading the result
 - **The first word is unreliable** (the decoder is still locking onto the tone and speed), so CER with the first word
   dropped is the fairer figure. One sample of about 40 characters is a noisy measurement: try several seeds, or run the

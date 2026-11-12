@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """suite.py - reproducible hand-sent CW test suite.
 
-  python3 suite.py list                       show the cases (operators x radio conditions)
+  python3 suite.py list [--tier T]                       show the cases (operators x radio conditions)
   python3 suite.py run --decoder ./harness    score any decoder: raw float32 mono 4000 Hz on stdin -> text on stdout
   python3 suite.py build --out DIR            write every case as WAV + JSON ground truth (for other tools / the radio)
 
@@ -15,9 +15,23 @@ import numpy as np
 import handsim as H, radio as R
 
 # Operators: key type x speed x seed.  (Persistent 'fist' sampled from handsim priors; values partly ASSUMED, see handsim.py)
-OPERATORS = [dict(key=k, wpm=w, seed=1000 * (i + 1) + 10 * j + s)
-             for i, k in enumerate(('straight', 'bug', 'paddle'))
-             for j, w in enumerate((10, 18, 28)) for s in range(2)]
+# Speed tiers. 'legacy' is the original 18-operator set (10/18/28 wpm), kept so earlier results stay comparable.
+# Nominal = typical on-air speeds (15-25 wpm); slow = 8-12; fast = 30-35 (paddle/bug only: straight key that fast is
+# unrealistic [ASSUMED]; straight key is also capped at 25 in 'nominal'). Seeds are disjoint between tiers.
+def _ops(keys_wpm, seeds, base):
+    return [dict(key=k, wpm=w, seed=base + 100 * i + 10 * j + s, tier=None)
+            for i, (k, ws) in enumerate(keys_wpm) for j, w in enumerate(ws) for s in range(seeds)]
+LEGACY = [dict(key=k, wpm=w, seed=1000 * (i + 1) + 10 * j + s)
+          for i, k in enumerate(('straight', 'bug', 'paddle')) for j, w in enumerate((10, 18, 28)) for s in range(2)]
+TIERS = {
+    'legacy':  LEGACY,
+    'nominal': _ops([('straight', (15, 18, 20, 22, 25)), ('bug', (15, 18, 20, 22, 25)), ('paddle', (15, 18, 20, 22, 25))], 2, 5000),
+    'slow':    _ops([('straight', (8, 10, 12)), ('bug', (8, 10, 12)), ('paddle', (8, 10, 12))], 2, 6000),
+    'fast':    _ops([('bug', (30, 35)), ('paddle', (30, 35, 40))], 2, 7000),
+}
+for _t, _l in TIERS.items():
+    for _o in _l: _o['tier'] = _t
+OPERATORS = TIERS['legacy']   # default; --tier selects others
 
 # Radio conditions (independent of the operator).
 CONDITIONS = {
@@ -66,20 +80,25 @@ def run_decoder(cmd, audio):
     p = subprocess.run(cmd, input=audio.tobytes(), capture_output=True, timeout=300)
     return norm(p.stdout.decode(errors='replace'))
 
+def pick(a):
+    names = list(TIERS) if a.tier == 'all' else a.tier.split(',')
+    return [o for n in names for o in TIERS[n]]
+
 def cmd_list(a):
-    print(len(OPERATORS), 'operators x', len(CONDITIONS), 'conditions =', len(OPERATORS) * len(CONDITIONS), 'cases')
+    OPERATORS = pick(a)
+    print(len(OPERATORS), 'operators x', len(CONDITIONS), 'conditions =', len(OPERATORS) * len(CONDITIONS), 'cases (tier %s)' % a.tier)
     for o in OPERATORS: print(' ', o)
     for k, v in CONDITIONS.items(): print(' ', k, v)
 
 def cmd_run(a):
     cmd = a.decoder.split()
-    cache = {}; rows = []
+    OPERATORS = pick(a); cache = {}; rows = []
     conds = a.cond.split(',') if a.cond else list(CONDITIONS)
     for op in OPERATORS:
         for cn in conds:
             g, audio = make_case(op, cn, cache)
             hyp = run_decoder(cmd, audio); e, n = score(norm(g['text']), hyp); e2, n2 = score_ns(norm(g['text']), hyp)
-            rows.append(dict(key=op['key'], wpm=op['wpm'], cond=cn, e=e, n=n, e2=e2, n2=n2, seed=op['seed'], hyp=hyp, ref=norm(g['text'])))
+            rows.append(dict(tier=op['tier'], key=op['key'], wpm=op['wpm'], cond=cn, e=e, n=n, e2=e2, n2=n2, seed=op['seed'], hyp=hyp, ref=norm(g['text'])))
     json.dump(rows, open(a.json, 'w'), indent=1)
     def agg(f, ns=False):
         d = collections.defaultdict(lambda: [0, 0])
@@ -88,7 +107,7 @@ def cmd_run(a):
     tot = sum(r['e'] for r in rows), sum(r['n'] for r in rows)
     t2 = sum(r['e2'] for r in rows), sum(r['n2'] for r in rows)
     print('TOTAL CER %.1f %% (%d/%d chars, %d cases) | ignoring word spaces: %.1f %%' % (100 * tot[0] / tot[1], tot[0], tot[1], len(rows), 100 * t2[0] / t2[1]))
-    for title, f in (('by condition', lambda r: r['cond']), ('by key type', lambda r: r['key']), ('by speed', lambda r: r['wpm'])):
+    for title, f in (('by tier', lambda r: r['tier']), ('by condition', lambda r: r['cond']), ('by key type', lambda r: r['key']), ('by speed', lambda r: r['wpm'])):
         print(title)
         a2 = agg(f, True)
         for k, (e, n) in agg(f).items(): print('  %-10s %5.1f %%   (no-space %5.1f %%)' % (k, 100 * e / n, 100 * a2[k][0] / a2[k][1]))
@@ -99,6 +118,7 @@ def cmd_run(a):
         print('  %-9s' % kt, *['%9.1f' % (100 * d[(kt, c)][0] / max(1, d[(kt, c)][1])) for c in conds])
 
 def cmd_build(a):
+    OPERATORS = pick(a)
     os.makedirs(a.out, exist_ok=True); cache = {}; man = []
     for op in OPERATORS:
         for cn in CONDITIONS:
@@ -113,7 +133,7 @@ def cmd_build(a):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest='cmd', required=True)
-    sp.add_parser('list')
-    r = sp.add_parser('run'); r.add_argument('--decoder', default='./harness 5'); r.add_argument('--cond', default=''); r.add_argument('--json', default='suite_results.json')
-    b = sp.add_parser('build'); b.add_argument('--out', default='suite_audio')
+    l = sp.add_parser('list'); l.add_argument('--tier', default='legacy')
+    r = sp.add_parser('run'); r.add_argument('--decoder', default='./harness 5'); r.add_argument('--tier', default='legacy', help='legacy|nominal|slow|fast|all or comma list'); r.add_argument('--cond', default=''); r.add_argument('--json', default='suite_results.json')
+    b = sp.add_parser('build'); b.add_argument('--out', default='suite_audio'); b.add_argument('--tier', default='legacy')
     a = ap.parse_args(); {'list': cmd_list, 'run': cmd_run, 'build': cmd_build}[a.cmd](a)
