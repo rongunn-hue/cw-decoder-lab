@@ -14,6 +14,7 @@ itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui))
 
 ## Documents
 - [docs/VERSIONS.md](docs/VERSIONS.md): which decoder versions exist (upstream, original OpenX6X00, rev 1) and exactly what rev 1 changes.
+- [docs/CHANGES.md](docs/CHANGES.md): exactly what rev 1 changed (algorithm, parameters, edits, fixes, what was tried and dropped).
 - [docs/RESULTS.md](docs/RESULTS.md): summary of all test results (by tier, condition and key type) with every caveat.
 - [docs/PROCEDURE.md](docs/PROCEDURE.md): how to run the demo and the suite yourself.
 - [docs/openx6x00_decoder_analysis.txt](docs/openx6x00_decoder_analysis.txt): full source analysis and research notes.

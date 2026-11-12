@@ -1,0 +1,77 @@
+# Unified diff of the three modified original files: OpenX6X00 eaf1974 src/cw_decoder -> decoder/src
+--- a/receiver.cpp
++++ b/receiver.cpp
+@@ -8,12 +8,13 @@
+ 
+ #include "receiver.h"
+ 
++#include <algorithm>
+ #include <utility>
+ 
+ namespace cw {
+ 
+ Receiver::Receiver(TextFn text, KeyFn key, StepFn step)
+-    : text_(std::move(text)), key_fn_(std::move(key)), step_fn_(std::move(step)) {
++    : text_(text), soft_(text), key_fn_(std::move(key)), step_fn_(std::move(step)) {
+     set_floor_db(5.0f);
+ }
+ 
+@@ -50,7 +51,18 @@
+         timer_.ours();
+     Sym s = timer_.step(e.dir, e.back_ms, e.strong);
+ 
+-    if (s != SYM_NONE) {
++    /* cwlab rev1: closed intervals go to the likelihood decoder */
++    if (e.dir == 0) {
++        run_ms_ += static_cast<float>(STEP_MS);
++        if (!key_down_prev_) soft_.idle(run_ms_, timer_.dot_ms());
++    } else {
++        float closing = std::max(run_ms_ - e.back_ms, 0.0f);
++        if (use_soft_) soft_.interval(key_down_prev_, closing, e.strong, timer_.dot_ms());
++        key_down_prev_ = e.dir > 0;
++        run_ms_ = static_cast<float>(STEP_MS) + e.back_ms;
++    }
++
++    if (s != SYM_NONE && !use_soft_) {
+         text_.put(s);
+         /* After our own last dit or dah the other sender's turn begins */
+         if (text_.own_ended())
+--- a/receiver.h
++++ b/receiver.h
+@@ -20,6 +20,7 @@
+ #include "element_timer.h"
+ #include "key_detector.h"
+ #include "morse_text.h"
++#include "soft_decoder.h"
+ #include "rx_defs.h"
+ #include "tone_finder.h"
+ #include "tone_lock.h"
+@@ -46,6 +47,7 @@
+     bool  locked() const { return lock_.holding(); }
+     float snr_db() const { return snr_db_; }              /* last step, on the locked tone */
+ 
++    void  use_soft(bool on) { use_soft_ = on; }
+     void  set_floor_db(float db) { keyer_.set_floor_db(db); }
+     void  set_band(float lo_hz, float hi_hz) { finder_.set_band(lo_hz, hi_hz); }
+     /* The radio's peak filter (APF) is on: its colour is taken out of the noise */
+@@ -74,6 +76,10 @@
+     KeyDetector  keyer_;
+     ElementTimer timer_;
+     MorseText    text_;
++    SoftDecoder  soft_;
++    bool  use_soft_ = true;
++    bool  key_down_prev_ = false;
++    float run_ms_ = 0.0f;
+     KeyFn        key_fn_;
+     StepFn       step_fn_;
+ 
+--- a/element_timer.h
++++ b/element_timer.h
+@@ -40,6 +40,7 @@
+      * long before this step; strong: (key up) the mark was well above the floor */
+     Sym   step(int dir, float back_ms, bool strong = true);
+ 
++    float dot_ms() const { return dot_ms_; }
+     float wpm() const { return static_cast<float>(PARIS_MS) / dot_ms_; }
+     bool  key_down() const { return down_; }
+ 

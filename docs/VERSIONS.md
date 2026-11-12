@@ -6,7 +6,8 @@
 | **original (OpenX6X00)** | https://github.com/Guru-RF/OpenX6X00, commit `eaf1974` (2026-11-11), `src/cw_decoder` | The decoder this project analysed. Same lineage as upstream with additions (better noise and carrier rejection). Used unmodified as the baseline: in the results it is "original". Built for the suite with `lab/harness.cpp` / `lab/harness2.cpp` against a clone of that repository. **Not in this repo.** |
 | **rev 1 (`cwdecode`)** | `decoder/` in this repo | A modified copy of the original. Front end unchanged; text stage replaced. See below. In the results it is "rev 1". |
 
-## What rev 1 changes relative to original (verified by file comparison against commit `eaf1974`)
+## What rev 1 changes relative to original
+Full description: [CHANGES.md](CHANGES.md); source diff of the edited original files: [`decoder/rev1-vs-original.diff`](../decoder/rev1-vs-original.diff). Summary (verified by file comparison against commit `eaf1974`)
 - **Identical to the original:** `tone_finder`, `tone_lock`, `key_detector`, `element_timer.cpp`, `morse_text`, `morse_code`, `audio_resampler.h`
   (tone finding, tone lock, keying detection, speed histogram, character table).
 - **New:** `soft_decoder.h/.cpp` (causal word-at-a-time likelihood/beam-search text stage with per-operator dit, dah and gap
