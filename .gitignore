@@ -4,3 +4,5 @@ decoder/cwdecode
 __pycache__/
 *.f32
 *.wav
+lab/h_*
+lab/harness

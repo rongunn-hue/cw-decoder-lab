@@ -12,6 +12,20 @@ itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui))
 | `tools/` | `build_lm.py`: rebuilds the decoder's bigram language-model table from ARRL W1AW/QST text. |
 | `results/` | Suite results JSON: original decoder vs rev 1. |
 
+## Quick start
+```
+# 1. liquid-dsp (libliquid-dev, or build https://github.com/jgaeddert/liquid-dsp and use LIQUID=<prefix>)
+cd decoder && [LIQUID=<prefix>] ./build.sh            # builds ./cwdecode
+./cwdecode.sh recording.wav                          # needs sox; prints text a word at a time
+rec -q -t f32 -r 4000 -c 1 - | ./cwdecode 5          # live; arg = threshold dB (raise on noisy bands)
+
+# 2. scoring (python3 + numpy)
+cd ../lab && python3 suite.py list
+python3 suite.py run --decoder "../decoder/cwdecode 5" --json rev1.json
+# baseline: git clone https://github.com/Guru-RF/OpenX6X00 ; [LIQUID=<prefix>] ./build.sh <clone>/src/cw_decoder ./harness
+python3 suite.py run --decoder "./harness 5" --json base.json
+```
+
 ## Results (read the caveats)
 Simulated suite character error rate: original 72.6% -> rev 1 41.8% (ignoring word spaces 67.3% -> 36.6%).
 Real machine-sent W1AW 20 wpm audio: 2.0% for both (no regression).
@@ -38,7 +52,7 @@ language model is English-biased.
 | Suite audio | Regenerated bit-for-bit: `python3 lab/suite.py build --out DIR` (seeded). |
 
 Not recoverable from here: exact intermediate runs (other `r_*.json` experiment files, binaries). Only the final and baseline results are in `results/`.
-`lab/` scripts contain paths from my working tree (`~/Chat-Projects/cwlab`); adjust as needed. Nothing here modifies or builds radio firmware.
+Nothing here modifies or builds radio firmware.
 
 ## License
 LGPL-2.1-or-later, same as the code it derives from (see `LICENSE`).
