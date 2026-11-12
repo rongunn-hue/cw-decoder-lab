@@ -24,10 +24,20 @@ Known limits: fast Rayleigh fading and a strong adjacent signal ~120 Hz away (~8
 unverified; one tone tracked; no squelch; output delayed up to a word; first word after lock unreliable;
 language model is English-biased.
 
-## Not included
-The OpenX6X00 and x6100_gui trees (clone them), liquid-dsp (build it; `decoder/build.sh` takes `$LIQUID`),
-audio, and the cited papers (copyright). `lab/` scripts contain some paths from the original working tree
-(`~/Chat-Projects/cwlab`); adjust as needed. Nothing here modifies or builds radio firmware.
+## Not included, and how to recover it
+| Item | Recovery |
+|---|---|
+| OpenX6X00 source | `git clone https://github.com/Guru-RF/OpenX6X00`; analysed at commit `eaf1974e55ff1d775a7a8157d665e4e1a54dfc69`. Needed for `lab/harness*.cpp` baseline builds (`decoder/src` already holds the modified copy). |
+| x6100_gui upstream | `git clone https://github.com/gdyuldin/x6100_gui`; compared at `a7597be6c80e80966d31b5fc8b66bbd7892a808d`. Only the upstream-diff addendum in `docs/` depends on it. |
+| liquid-dsp | Built from source (1.6.0 used): https://github.com/jgaeddert/liquid-dsp ; point `decoder/build.sh` at it with `LIQUID=<install prefix>`. |
+| W1AW 20 wpm audio (the real machine-sent check) | Not stored; I did not record its exact download URL. W1AW code-practice audio is published by ARRL (https://www.arrl.org/w1aw-operating-schedule lists the practice files); the transcript text for each file is on arrl.org too. Any W1AW file with its text works. |
+| Language-model text | `decoder/src/cw_lm.h` is the finished bigram table (trained on ~108k characters of W1AW/QST text from arrl.org). The training script and source text are not in the repo, so the table cannot be regenerated exactly; retraining means writing a new counting script. |
+| Bell 1977 thesis | Naval Postgraduate School repository (NPS DSpace); I fetched it through the DSpace API. Slayton et al. 2020, PLoS ONE, PMC6944339 (Europe PMC XML). |
+| Papers I could not get | Bell's JACM paper, Meisel's TSC report, Guenther 1973: access blocked or unavailable; listed in `docs/` Addendum D. |
+| Suite audio | Regenerated bit-for-bit: `python3 lab/suite.py build --out DIR` (seeded). |
+
+Not recoverable from here: exact intermediate runs (other `r_*.json` experiment files, binaries). Only the final and baseline results are in `results/`.
+`lab/` scripts contain paths from my working tree (`~/Chat-Projects/cwlab`); adjust as needed. Nothing here modifies or builds radio firmware.
 
 ## License
 LGPL-2.1-or-later, same as the code it derives from (see `LICENSE`).
