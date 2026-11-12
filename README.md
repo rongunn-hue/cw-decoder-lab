@@ -12,6 +12,12 @@ itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui))
 | `tools/` | `build_lm.py`: rebuilds the decoder's bigram language-model table from ARRL W1AW/QST text. |
 | `results/` | Suite results JSON: original decoder vs rev 1. |
 
+## Documents
+- [docs/VERSIONS.md](docs/VERSIONS.md): which decoder versions exist (upstream, original OpenX6X00, rev 1) and exactly what rev 1 changes.
+- [docs/RESULTS.md](docs/RESULTS.md): summary of all test results (by tier, condition and key type) with every caveat.
+- [docs/PROCEDURE.md](docs/PROCEDURE.md): how to run the demo and the suite yourself.
+- [docs/openx6x00_decoder_analysis.txt](docs/openx6x00_decoder_analysis.txt): full source analysis and research notes.
+
 ## Try it: simulated operator -> radio channel -> decoder
 ```
 cd decoder && ./build.sh && cd ../lab      # build once (needs liquid-dsp; LIQUID=<prefix> if not in /usr)
@@ -45,7 +51,7 @@ python3 apply_radio.py /tmp/base.wav /tmp/base_qsb.wav --cond qsb_deep
 ../decoder/cwdecode.sh /tmp/base_qsb.wav; cat /tmp/base.txt
 ```
 
-## Results (read the caveats)
+## Results (read the caveats; full tables in docs/RESULTS.md)
 Simulated suite character error rate: original 72.6% -> rev 1 41.8% (ignoring word spaces 67.3% -> 36.6%).
 Real machine-sent W1AW 20 wpm audio: 2.0% for both (no regression).
 
