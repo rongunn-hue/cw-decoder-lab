@@ -24,6 +24,10 @@ cd ../lab && python3 suite.py list
 python3 suite.py run --decoder "../decoder/cwdecode 5" --json rev1.json
 # baseline: git clone https://github.com/Guru-RF/OpenX6X00 ; [LIQUID=<prefix>] ./build.sh <clone>/src/cw_decoder ./harness
 python3 suite.py run --decoder "./harness 5" --json base.json
+
+# 3. one hand-sent sample to play with (WAV + the text that was sent)
+python3 make_sample.py /tmp/demo --key paddle --wpm 18 --snr 40 --seed 5
+../decoder/cwdecode.sh /tmp/demo.wav; cat /tmp/demo.txt
 ```
 
 ## Results (read the caveats)
