@@ -28,6 +28,11 @@ python3 suite.py run --decoder "./harness 5" --json base.json
 # 3. one hand-sent sample to play with (WAV + the text that was sent)
 python3 make_sample.py /tmp/demo --key paddle --wpm 18 --snr 40 --seed 5
 ../decoder/cwdecode.sh /tmp/demo.wav; cat /tmp/demo.txt
+
+# 4. same sample through a simulated radio channel (fading, QRM, QRN, AGC ...): python3 apply_radio.py --list
+python3 make_sample.py /tmp/base --snr 200 --seed 5
+python3 apply_radio.py /tmp/base.wav /tmp/base_qsb.wav --cond qsb_deep
+../decoder/cwdecode.sh /tmp/base_qsb.wav; cat /tmp/base.txt
 ```
 
 ## Results (read the caveats)
