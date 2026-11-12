@@ -1,0 +1,6 @@
+*.o
+cwdecode/cwdecode
+decoder/cwdecode
+__pycache__/
+*.f32
+*.wav

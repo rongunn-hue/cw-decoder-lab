@@ -1,0 +1,439 @@
+OpenX6X00 CW DECODER ANALYSIS
+=============================
+Repository : https://github.com/Guru-RF/OpenX6X00.git
+Commit     : eaf1974e55ff1d775a7a8157d665e4e1a54dfc69  (2026-11-11, "Tuning step: 10, 25 and 100 kHz ...")
+Checkout   : fresh clone, no local modifications (openx6x00_status.txt is empty). Clone at ~/Chat-Projects/OpenX6X00
+Other files: openx6x00_revision.txt, openx6x00_remotes.txt, openx6x00_cw_search.txt (3425 raw grep hits, mostly
+             unrelated: JS8 tables, Eigen, "dit" substring matches). No radio or firmware was touched or built.
+Everything below marked [V] was read directly in source. Items marked [H] are hypotheses/unverified.
+All paths relative to repo root; line numbers are from this commit.
+
+1. PRINCIPAL FILES  (src/cw_decoder/, 1699 lines total, C++17, license LGPL-2.1-or-later)
+-----------------------------------------------------------------------------------------
+ rx_defs.h          rates, block sizes, constants, enum Sym, PeakReport
+ tone_finder.cpp    FFT peak search + band noise floor + optional APF compensation
+ tone_lock.cpp      NCO + 100 Hz LPF + 64-sample integrator + PLL; "is the station still here" logic
+ key_detector.cpp   Schmitt trigger following mark peak, carrier (birdie) floor, sub-step edge interpolation
+ element_timer.cpp  mark/gap timing -> DIT/DAH/ELEM_GAP/CHAR_GAP/WORD_GAP; histogram speed learning
+ morse_text.cpp     collects dits/dahs, looks up character at character gap
+ morse_code.c       Morse table (strcmp linear lookup)
+ receiver.cpp/.h    glue: feed() -> finder -> lock -> keyer -> timer -> text
+ audio_resampler.h  liquid msresamp wrapper, 11025 Hz app audio -> 4000 Hz
+ Integration (NOT decoder core, X6100-specific):
+ src/cw.cpp         audio-thread hookup, squelch (cw.cpp:183), WPM report, tune indicator (on_frame cw.cpp:264)
+ src/cw_decoder.c   output sink to LVGL panel/remote server only
+ src/dialog_cw_trainer.c, tools/cw_trainer/  trainer; drives receiver->expect()/own()/trainer_range()
+ Unrelated to decoding (keyer/TX): src/cw_encoder.c, src/paddle_keyer.c, src/cw_beacon.c, src/cw_messages.c
+
+2. PIPELINE  (audio in -> text out)  [V]
+----------------------------------------
+ cw.cpp:179   resampler->process(n, samples, *receiver)   11025 Hz -> 4000 Hz (audio_resampler.h:21, 60 dB stopband)
+ receiver.cpp:26 Receiver::feed(), per sample:
+   a) ToneFinder::push (tone_finder.cpp:80): 256-pt Hann FFT every 64 samples (64 ms window, 16 ms hop, 15.6 Hz bins)
+   b) ToneFinder::analyse (:102): strongest bin in [band_lo..band_hi] (set from CW filter, default 400-1200 Hz);
+      noise = 25th percentile of band power, slow-averaged (up 0.003, down 0.01 per frame);
+      parabolic interpolation in dB for sub-bin peak frequency; SNR = peak/noise;
+      "steady" counter = consecutive frames with peak >= 15.5 dB over noise within +-1 bin.
+      Optional APF (radio's peak filter) response divided out (apf_gain2, :17).
+   c) ToneLock::follow (tone_lock.cpp:104): retunes NCO to FFT peak only if peak steady >= 2 frames, is >= 2 bins
+      from lock, and the current station is judged gone (no energy 1 s) or only a skirt of a stronger station
+      ("elsewhere_" counter, 12 dB rule, 32 count = ~0.5 s key-down).
+   d) ToneLock::push (:128): real input x NCO (complex mix to 0 Hz) -> 81-tap Kaiser FIR LPF, 100 Hz cutoff ->
+      mean of last 64 complex baseband samples (16 ms) every 32 samples (8 ms) -> power = |mean|^2.
+      This 8 ms step is the time base of everything downstream (STEP_MS = 8, rx_defs.h).
+   e) ToneLock::every_4_steps (:164): PLL phase-error update on 4-step (32 ms) means, pull scaled by run SNR
+      (0 at SNR 2, full at 5), only between two "alive" runs; alive = smoothed power/noise > 4.
+   f) KeyDetector::step (key_detector.cpp:40): r = power/noise. Carrier floor = 5th percentile of r over first
+      125 steps (1 s, during which output is muted) then quantile-tracked; if key down > 60 steps (480 ms) floor
+      rises 5%/step (treated as carrier). Effective noise scaled up when carrier floor > 2x expected.
+      schmitt (:79): on-threshold = max(peak-3 dB, user floor dB); off-threshold = max(peak-6 dB, floor-3 dB);
+      peak decays 0.97/step key-down, 0.94/step key-up. Edge needs 2 consecutive steps over threshold
+      (3 after >=400 ms quiet). crossing() (:142) interpolates the edge time within the step using sqrt(power)
+      (amplitude) ramp -> back_ms. "strong" flag = mark peaked floor+3 dB.
+   g) ElementTimer::step (element_timer.cpp:243): accumulates run length in ms, splits the edge step by back_ms;
+      close() (:219) classifies: mark < 2.0*dot = DIT else DAH; gap < 1.7*dot = element gap, < 5*dot (or
+      Farnsworth-adjusted) = char gap, else word gap.
+      Held-mark logic: the first mark after a word gap is held until more keying follows (lone weak blip dropped,
+      lone strong mark >= 0.7 dot becomes a one-element word at word gap). Mark > 8 dots = carrier, ignored.
+      End-of-text: no mark for max(5*char_from, 200 ms, word_from) -> synthetic WORD_GAP so last char flushes.
+   h) MorseText::put (morse_text.cpp:32): '.'/'-' appended (max 12); CHAR_GAP -> flush(); WORD_GAP -> flush + one
+      space (never two). Unknown code -> "<?>".  Table lookup morse_code.c:46.
+   i) cw.cpp:241 on_text -> squelch (cw.cpp:183) -> cw_decoder_text() -> panel / remote server.
+
+3. TIMING / SPEED ESTIMATION  [V]
+---------------------------------
+ - Speed state is a single dot length dot_ms_ (start 60 ms = 20 WPM; clamp 24..120 ms = 50..10 WPM;
+   trainer mode up to 240 ms = 5 WPM).
+ - learn() (element_timer.cpp:143): every closed mark AND gap length is added to a 300-slot histogram (4 ms/slot,
+   to 1.2 s), each entry smeared as a +-4 slot triangle; all entries age x0.9 per new entry.
+ - dot_estimate() (:175): finds the lowest-length peak (>= 8% of top), then the next cluster starting >= 1.7x that,
+   takes the centre of mass of everything from 0 to the valley between. Marks and element gaps share the
+   lowest cluster (marks measured long, gaps short, so centre of mass balances them).
+ - set_dot() (:90): estimate within 25% of dot_ms_ -> low-pass (gain 0.3). Further than 25% -> candidate new speed,
+   needs histogram >= 8 entries, must be confirmed by a stricter (25%-peak) estimate, and 3 consecutive agreeing
+   estimates, then the histogram is cleared and dot_ms_ set outright.
+ - Thresholds are FIXED RATIOS of the single dot estimate: dit/dah 2.0, char gap 1.7, word gap 5.0.
+   Farnsworth: median of last 16 character gaps (>=8 needed) can raise the word boundary: 5/3*(gap-dot), cap 3 s.
+ - No per-element adaptive thresholds, no dah/dit ratio estimate, no lookahead, no Viterbi/HMM, no dictionary.
+
+4. DSP SUMMARY  [V]
+-------------------
+ FFT (liquid fft_create_plan, Hann, 256), 25th-percentile noise estimator, NCO + 81-tap Kaiser LPF + boxcar
+ integrator, Costas-like PLL on 32 ms means (cross product phase error), power Schmitt trigger with peak-following
+ thresholds, quantile carrier floor. No Goertzel. No bandpass beyond the 100 Hz baseband LPF.
+
+5. CONFIDENCE / NOISE REJECTION  [V]
+------------------------------------
+ - Dec SNR user threshold (default 5 dB in Receiver ctor, receiver.cpp:17; UI default 8 per MANUAL.md) = floor_db.
+ - 1 s mute after tone change/reset.
+ - Lone-mark rejection (held mark, strong flag), carrier rejection (>8 dots, key-detector carrier floor).
+ - Tone-lock liveness: station dropped only after ~1 s absence.
+ - Squelch in cw.cpp:183 (not in the decoder core): a character is "good" when mean keyed SNR >= floor + 5 dB;
+   opens after 3 good chars, closes after 2 bad, or 3 s idle; weak chars held pending and printed only if a good
+   one follows.
+ - NO per-character confidence output, NO error correction, NO spell/callsign/dictionary correction.
+   Output for an unknown pattern is the literal "<?>". "<ERR>" for 6-8 dots.
+
+6. ORIGIN  [V from repo text, partly H]
+---------------------------------------
+ - src/cw_decoder/receiver.h:12-14: "The design (FFT tone search, coherent lock with a PLL, Schmitt detector
+   following the mark peak, histogram of mark and gap lengths) is the one of Georgy Dyuldin's receiver in x6100_gui;
+   this is a new implementation of it."
+ - docs/MANUAL.md ("CW decoder", ~line 3219): "The receiver comes from gdyuldin x6100_gui 1.0.1 ... Upstream bugs
+   fixed here: a strong station slightly off tune was never decoded, and a dash cut by a retune came out as a dot."
+   Claims 98-100% copy 20..0 dB SNR in 2.5 kHz, 97-100% at -3 dB, "the old decoder stopped at about +5 dB".
+   These are the project's own claims on test signals; not independently verified here.
+ - README.md ~313-319: lineage is IU1WXY firmware v0.127 (17 Oct 2026, LGPL) -> built on R1CBU (Oleg Belousov) GUI
+   and Georgy Dyuldin R2RFE (gdyuldin/x6100_gui); decoders for other modes by 1KO125. IU1WXY went closed at v0.128.
+ - ANSWER TO "R1CBU or IU1WXY?": by the repo's own statements the CW decoder design descends from gdyuldin's
+   x6100_gui receiver (the maintained fork of R1CBU's original GUI), NOT from an IU1WXY-authored decoder. The repo
+   states the current code is a NEW IMPLEMENTATION, so it is not identical to its predecessor. R1CBU's original
+   (pre-gdyuldin) CW decoder is not addressed in this repo [H: likely a simpler decoder].
+ - History: git history here is squashed. src/cw_decoder/* first appears in 4a058b6 (2026-10-20, v0.1.0) already
+   in its present structure; the old decoder and the original gdyuldin code are NOT in this repo. Later changes are
+   almost all CW-Trainer support (Joeri Van Dooren ON6URE, commits 6ffbb5e..0e5a623, 2026-11-01/02: own-keying not
+   learned, 5 WPM range, long-dah-is-not-carrier). Core algorithm unchanged in those commits [V by commit subjects;
+   diffs not individually reviewed].
+ - NOT YET DONE: fetch gdyuldin/x6100_gui 1.0.1 source and diff against this. Needed to confirm what "new
+   implementation" changed and to see R1CBU's original.
+
+7. LIMITATIONS RELEVANT TO HAND-SENT MORSE  [V from code; effect on real audio is H until tested]
+-------------------------------------------------------------------------------------------------
+ - Single global dot length with fixed ratio thresholds (2.0 / 1.7 / 5.0). Hand-sent dah/dit ratios vary (2-4+) and
+   a "bug"/swing sender has short dits and long dahs; the dit/dah boundary at 2 dots can fail for sloppy senders.
+ - Speed learning requires 3 consecutive agreeing estimates after >=8 histogram entries to change by >25%, so
+   abrupt speed changes lag by a number of elements; a slowing/accelerating hand sender is tracked only by the 0.3
+   smoothing within 25%.
+ - Marks and gaps pooled into one histogram cluster assumes marks ~ dot + epsilon and element gaps ~ dot; irregular
+   hand-sent element gaps pollute the dot estimate.
+ - Character gap threshold 1.7 dots is intentionally short: hand senders with long intra-character gaps will be
+   split into extra characters; short inter-character gaps will be merged. No contextual correction.
+ - Hard decisions per element at the time of the edge; no retroactive re-segmentation when speed estimate later
+   moves; no alternatives/probabilities carried to the text stage.
+ - Morse table fixed; unknown -> "<?>", no fuzzy matching (e.g. nearest valid code).
+ - Tracks ONE tone; 1 s mute on start; 100 Hz baseband LPF (+-100 Hz) and 8 ms step bound the maximum speed and
+   edge-time resolution (STEP_MS=8; sub-step interpolation partly compensates). Max speed clamp 50 WPM.
+ - Carrier/lone-blip rules were tuned for >= 10 WPM (comment in element_timer.h, trainer_range).
+ - Noise floor is the 25th percentile of the FFT band: with other strong CW signals in-band this is biased [H].
+ - The squelch lives outside the core and is tuned for HF noise; it can swallow weak real text [H].
+ - X6100 coupling: first-second mute, VFO-follow, APF compensation, trainer hooks are in the core classes.
+
+8. EXTRACTABILITY FOR STANDALONE LINUX  [V for dependencies; H for effort]
+--------------------------------------------------------------------------
+ Highly extractable. The core (src/cw_decoder/*) is self-contained C++17 with the only external dependency
+ liquid-dsp (fft, nco_crcf, firfilt_crcf, msresamp_rrrf) - available on Linux (libliquid-dev). No LVGL, no radio
+ code, no threads in the core. Interface is Receiver(TextFn, KeyFn, StepFn) + feed(const float*, n) at 4000 Hz.
+ To replace or remove:
+  - audio_resampler.h assumes 11025 in; replace with any resampler to 4000 Hz (or use liquid msresamp for any rate
+    from 8000/44100/48000; "downsampling only" per its own comment).
+  - cw.cpp: all of it is app glue (cfg_sm settings subscriptions, atomics, AUDIO_CAPTURE_RATE, squelch). The
+    squelch (cw.cpp:183-240) is portable logic and could be copied; the rest replaced by a small main().
+  - cw_decoder.c / panel / remote_server: replace with stdout.
+  - Trainer-only hooks (expect, own, turn, trainer_range, ours) can be left unused or removed.
+  - CMake: src/cw_decoder/CMakeLists.txt builds a static lib with only liquid as dependency.
+ Test assets: tools/cw_trainer/cw_trainer_test.cpp is a host test harness that already runs the real decoder on
+ synthetic keyed audio (see its Makefile). [V that it exists; not run.] There is NO tests/cw_decoder directory in
+ this commit although the CMakeLists comment refers to one [V].
+
+9. WHAT IS NEEDED TO COMPARE WITH XIEGU'S FACTORY CW DECODER
+------------------------------------------------------------
+ - Factory decoder source is closed [H: base firmware, not in this repo]; only black-box comparison is possible.
+ - Need identical WAV test material: (a) synthetic keyed CW at known WPM, SNR, with controlled jitter; (b) real
+   recordings of hand-sent CW (straight key, bug, paddle) with ground-truth transcripts; (c) varying speed,
+   QSB, QRM, a weak/strong two-station case.
+ - Capture the radio's decoded text for the same audio (play WAV into radio audio input, record screen/log).
+ - Run OpenX6X00 receiver offline on the same WAVs through a small host harness (to be written) and score by
+   character error rate / Levenshtein.
+ - Also fetch gdyuldin/x6100_gui 1.0.1 and the pre-existing R1CBU decoder for a three-way comparison.
+ - Metrics: CER vs SNR, vs sending jitter, time to lock, speed-change recovery, false text on noise-only audio.
+
+10. NEXT STEPS (NOT DONE; nothing was modified)
+-----------------------------------------------
+ 1. Obtain gdyuldin/x6100_gui source and diff its decoder against this one.
+ 2. Build a minimal Linux harness around cw::Receiver (WAV/stdin/ALSA in, text out) in a separate directory.
+ 3. Collect hand-sent test recordings with ground truth.
+ 4. Only then decide on improvements (candidate areas, all H: per-element adaptive dit/dah and gap clustering,
+    retroactive re-segmentation, probabilistic/beam decoding with a character/word language model).
+
+==============================================================================
+ADDENDUM A — UPSTREAM COMPARISON (gdyuldin/x6100_gui)   [V = read in source]
+==============================================================================
+Upstream: https://github.com/gdyuldin/x6100_gui   clone: ~/Chat-Projects/x6100_gui
+HEAD a7597be6c80e80966d31b5fc8b66bbd7892a808d ; tags v1.0.0, v1.0.1 (the version MANUAL.md cites), v1.0.2, v1.1.0, v1.2.0.
+Upstream src/cw_decoder/ at HEAD is identical to v1.0.1 (diff v1.0.1..HEAD touches only 1 line in src/cw.cpp).
+
+A1. UPSTREAM LINEAGE (git history)  [V]
+ - 2023-02-06..19  R1CBU (Belousov Oleg): "Initial CW decoder" a54fce1, fabdb91 "Improved CW decoder" ... src/cw_decoder.c.
+   Header says "Based on idea Michael A. Maynard, a.k.a. K4ICY". It is a threshold/debounce + moving-average
+   (HIST_SIZE 10 short/long/space event averages, compare_factor 2.0, word_space_timing 3.0) decoder on the key line
+   ("key_line" events), NOT FFT/PLL based. [V first 150 lines read; remainder not read]
+ - 2025-01-31 Dyuldin: src/dsp.c -> C++; cw decoder moved.
+ - 2026-03-04 "Prevent overflow on CW decoder"; 2026-06-09 "Add CW ZAP, update CW Decoder".
+ - 2026-09-21 Dyuldin ada52d7 "Add bayes CW decoder/detector": new src/cw_bayes/ (power_detector, time_classifier,
+   morse_decoder, cw_receiver). The name "bayes" was dropped on rename (9be9588, 2026-09-29, "Rename CW decoder"
+   -> src/cw_decoder/). Whether anything in it is actually Bayesian: NOT in the final code I read (see A3). [V]
+ - 2026-09-29 Dyuldin: 0e68094 "Fix wrong WPM detecting", 4c12a5e "Add missed CW detector",
+   c46edbe "Add support of the CW peak to CW decoder", caa51ac "make elem/letter K shorter to avoid combining letters"
+   (this is the 1.7 dots character-gap constant).
+ - So the OpenX6X00 decoder descends from Dyuldin's 2026-09 FFT/NCO/PLL receiver, NOT from R1CBU's 2023 K4ICY-style
+   decoder; R1CBU's decoder was replaced entirely. IU1WXY is not in this chain in the repos I examined. [V]
+ - Not examined: IU1WXY's firmware v0.127 source (not located) — whether it carries Dyuldin's receiver unchanged
+   is not established.
+
+A2. UPSTREAM STRUCTURE vs OPENX6X00  [V]
+   upstream (1491 lines)                    OpenX6X00 (1699 lines)
+   cw_receiver.cpp  (FFT peak+noise)   ->   tone_finder.cpp (+ receiver.cpp glue)
+   spgram_real.h    (STFT)             ->   inlined in ToneFinder::push
+   coherent_tone_tracker.h             ->   tone_lock.cpp
+   detector.h                          ->   key_detector.cpp
+   time_classifier.cpp                 ->   element_timer.cpp
+   morse_decoder.cpp (binary tree)     ->   morse_text.cpp + morse_code.c (strcmp table)
+   peak_filter_response.h              ->   apf_gain2() in tone_finder.cpp
+ Constants IDENTICAL in both (verified side by side): 4000 Hz rate; 256 FFT / hop 64; integrator 64 / hop 32 (8 ms);
+ NOISE_ALIGN = (1/0.28768)*256/(1.5*64) (= NOISE_TO_STEP); NOISE4 = 7/16; strong-peak gate 15.5 dB; 2 steady frames;
+ 81-tap Kaiser LPF at 100 Hz, 60 dB; PLL bandwidth 0.001; start tone 670 Hz; alive EMA 0.125, alive threshold 4,
+ PLL weight 2..5, 32-window veto, 2-bin retune hysteresis; Schmitt -3/-6 dB on peak with decay 0.97/0.94, floor and
+ floor-3 dB; 2-edge confirmation; sqrt-amplitude edge interpolation; histogram 300 bins x 4 ms; triangle spread +-4;
+ peak prominence 0.08; cluster separation 1.7; centroid cap 2.2; relock 25% / 3 confirmations / 8 min samples;
+ unit EMA 0.3; histogram forget 0.9; unit range 24-120 ms; thresholds 2.0 / 1.7 / 5.0 dots; idle-word 5x elem/letter
+ threshold with 200 ms floor; 25th-percentile noise with 0.003/0.01 smoothing; parabola in dB with d < -1.5.
+ => The core signal chain and the timing classifier are the same algorithm with the same numbers. OpenX6X00's
+ "new implementation" is a restructure/rename plus additions, not a different algorithm. [V]
+
+A3. WHAT OPENX6X00 ADDS  (absent upstream)  [V]
+ 1. KeyDetector carrier floor (key_detector.cpp:40..): 1 s batch 5th-percentile of power/noise, quantile tracking,
+    carrier_ rises if key-down > 480 ms, effective noise raised when floor > 2x expected (birdie rejection);
+    output muted for first 1 s; extra QUIET_STEPS rule (3 steps for first mark after >=400 ms quiet);
+    "strong" flag = mark peak >= floor+3 dB. (Upstream detector.h has only the Schmitt + interpolation.)
+ 2. ElementTimer: held first mark after a word gap (blip vs E/T), lone-mark minimum 0.7 dot, carrier > 8 dots
+    ignored, Farnsworth word-gap adaptation from median of last 16 character gaps (cap 3 s), end-of-text lasts
+    max(5*char_from, 200 ms, word_from) (upstream: 5*elem_letter_threshold, 200 ms; same unless Farnsworth),
+    new_tone()/turn()/ours()/expect()/trainer_range() hooks, 5 WPM floor in trainer mode.
+ 3. ToneLock::follow: "elsewhere_" logic using PeakReport.at_lock (is the lock a skirt of a stronger station?),
+    HOLD_RUNS/GONE_RUNS states, tune()/shift() for VFO following (upstream consider_retune only has the 32-window
+    veto).
+ 4. Text stage: strcmp table instead of binary tree; unknown code -> "<?>" (upstream: ERR string for tree miss);
+    own-keying bookkeeping for the CW Trainer; at most one space.
+ 5. cw.cpp squelch (SQ_MARGIN_DB 5, open after 3 good chars, close after 2 bad / 3 s idle, pending chars). Upstream
+    cw.cpp has only a cw_decoder_snr threshold; I did not find a comparable squelch in upstream cw.cpp. [V by grep]
+ 6. Timing change: upstream classifier resets nothing on retune except in-flight interval (on_retune keeps unit and
+    histogram); OpenX6X00 new_tone() marks the running mark/gap "unsure" (not learned) and keeps the speed. Similar
+    intent, different mechanism. [V]
+ Behaviour fixes OpenX6X00 claims over upstream (MANUAL.md): strong station slightly off tune never decoded; dash cut
+ by a retune came out as a dot. These correspond to the elsewhere_/unsure_ additions; I did not test either claim.
+
+A4. WHAT UPSTREAM HAS THAT OPENX6X00 LACKS  [V]
+ - Binary-tree morse lookup (cosmetic; OpenX6X00 table is equivalent for the same code set).
+ - Upstream test tree tests/cw_decoder/ (test_cw_receiver, test_detector, test_time_classifier, test_morse_decoder,
+   test_spgram_real, test_peak_filter_response, hist_forget_sweep tool referenced in time_classifier.h) and an
+   "offline inspector" diag interface (diag_* fields in CwReceiver, cw_receiver_diag_access.h). OpenX6X00's
+   CMakeLists references tests/cw_decoder but that directory does not exist in this repo. => upstream is the better
+   source for a standalone test/diagnostic harness. [V]
+ - Upstream exception table of 26 entries (morse_decoder.h:71) covers punctuation/prosigns; OpenX6X00 table covers
+   essentially the same set (not line-compared).
+
+A5. CONCLUSIONS FOR THE STANDALONE-DECODER GOAL
+ - Neither version contains Bayesian/probabilistic decoding, language modelling or retroactive re-segmentation; the
+   "bayes" directory name in upstream history did not survive in the code I read. [V]
+ - The algorithm that matters for hand-sent Morse (single dot estimate, fixed 2.0/1.7/5.0 ratios, hard per-element
+   decisions) is identical in both. Section 7 limitations therefore apply to upstream too.
+ - Best base for extraction: OpenX6X00's version has better noise/carrier rejection; upstream's has tests,
+   diagnostics hooks and a cleaner header-only structure. Taking OpenX6X00's core plus upstream's tests/inspector
+   approach is reasonable. [H]
+ - Still to do: read the remaining part of R1CBU's 2023 decoder if a baseline of "what hand-sent CW looked like to the
+   original" matters; locate IU1WXY v0.127 source to confirm no IU1WXY-specific changes.
+
+==============================================================================
+ADDENDUM B — TIMING-STAGE EXPERIMENT (simulation; NOT real recordings)
+==============================================================================
+Code: ~/Chat-Projects/cwlab/timing_lab.py, diag.py, viterbi.py (my own Python; liquid-dsp build was not permitted, so the
+DSP front end was NOT run). timing_lab.py is a port of ElementTimer close/learn/dot_estimate/set_dot/retime from
+element_timer.cpp as read; the held-first-mark/carrier/lone-mark logic is OMITTED. Input = detector-style intervals
+(8 ms grid, marks +6 ms, gaps -6 ms, 3 ms noise). Sender model = my assumption: lognormal jitter on every element,
+dah ratio ~N(r, sd), gap means/sd as listed, random-walk speed drift. Text: random ham words (12 words/trial).
+Scores = character error rate (Levenshtein/len). 25 trials/scenario; seeds fixed.
+
+Where the current timer errs (good-hand scenario, per-decision error rates, diag.py):
+  element gap read as char gap 3.7% (splits letters), dit->dah 3.9%, dah->dit 2.8%, char gap->word gap 4.5%,
+  word gap->char gap 5.1%. With ~2.5 elements/char these compound to ~20-25% CER. Each is a HARD threshold at a fixed
+  multiple of ONE pooled dot estimate (2.0 / 1.7 / 5.0).
+
+CER %            current(port)  local-cluster(2-pass)  viterbi+params
+good hand            25.3            17.5                  12.4
+sloppy hand          84.1            46.7                  34.4
+bug swing            60.6            13.0                  10.4
+fast 28 wpm          21.2            20.4                  15.4
+slow 10 wpm          34.9            18.0                  12.2
+tight 2.2/5 dots     51.7            43.3                  45.9   (viterbi worse than local-cluster here)
+drift 4%/elem        26.4            19.2                  15.2
+Farnsworth x1.8      39.5             8.2                   7.4
+
+What the two alternatives do (both separate dit/dah, element/char/word gap models, no fixed ratio constants):
+  local-cluster: per-interval thresholds from 2-means on marks and log-domain 2-means on gaps in a +-12 interval window.
+  viterbi+params: same local parameter estimates, but NO hard decisions: lognormal likelihood of every interval under
+  {dit,dah} / {element,char,word gap}, joint beam search over characters (state = partial code), letter-frequency
+  unigram prior, invalid code penalty. Equivalent to removing the hard-threshold stage.
+Caveats (all real): windows are non-causal (+-14 intervals, ~1-3 s of added delay); sender model is mine and may differ
+from real operators; the unigram prior is tiny; the comparison port lacks the held-mark logic; no noise/DSP errors are
+included (key detector misses/glitches would add errors to every decoder); "tight 2.2/5" shows the gap models still fail
+when char/element gaps genuinely overlap. These numbers are evidence for WHERE to change the code, not a claim of
+real-world accuracy.
+
+ELEMENTAL CHANGES SUGGESTED BY THE CODE READ + EXPERIMENT (hypotheses until tested on real audio)
+ 1. Replace hard dit/dah and gap thresholds (ElementTimer::close, element_timer.cpp:219) with likelihoods; decode a
+    character/word jointly (Viterbi/beam) instead of emitting at each gap. Largest measured gain.
+ 2. Estimate dit, dah, element-gap, char-gap and word-gap centres SEPARATELY (marks and gaps are pooled into one
+    cluster today, dot_estimate() :175), so dah ratio and sloppy/short gaps stop corrupting the threshold.
+ 3. Carry per-interval softness out of the detector (duration uncertainty, mark SNR, edge-quality) into the likelihood;
+    today KeyEdge only has dir/back_ms/strong.
+ 4. Allow retroactive re-segmentation: keep a short interval history and re-decode the last word when the speed/ratio
+    estimate moves (a speed change costs several elements today: relock needs 3 confirmations).
+ 5. Add language prior (letter n-gram, callsign/Q-code/prosign patterns) as the Viterbi path score; invalid codes become
+    low-probability paths instead of "<?>".
+ 6. Front end (unchanged, but note): 8 ms step + 6 ms edge bias are small next to hand-sent jitter; the DSP chain is
+    sound and is not the limiting stage for hand-sent timing in this model.
+
+==============================================================================
+ADDENDUM C — LITERATURE ON HAND-SENT TIMING STATISTICS (for building a facsimile)
+==============================================================================
+No public dataset of per-element hand-sent timing, and no published per-operator parameter tables, were found.
+Best sources located (all read by me unless noted):
+ 1. E. L. Bell, "Optimal Bayesian estimation of the state of a probabilistically mapped memory-conditional Markov
+    process with application to manual Morse decoding", NPS thesis, Sept 1977, handle 10945/26668.
+    PDF + text saved: ~/Chat-Projects/cwlab/refs/bell1977.pdf / bell1977.txt. Key statements [V]:
+    - "when normalized for speed variation, the density of each symbol duration, averaged over several operators,
+      approaches the gaussian density. For individual operators, however, the densities are far from gaussian, and no
+      single normalizing technique was found ... estimation of these highly individualistic densities must be
+      accomplished on-line" (ca. line 5815).
+    - Model: instantaneous element duration A per symbol; dot=elem space=A, dash=char space=3A, word space=7A,
+      pause=14A; speed-normalised durations modelled as Laplacian (double-sided exponential) about the nominal
+      multiple, with parameters chosen so P(dot read as dash)=1.35% at optimum threshold (ca. line 6060). The 1.35% is
+      stated as the average error over "55 samples of hand-keyed Morse studied in the TSC analysis".
+    - Dependence on past symbols is present even for straight keys: reduced variability of element-space duration when
+      the preceding symbol was a dot (ca. line 5715); stronger for bugs and electronic bugs.
+    - Field test: HKM (hand-keyed) samples 16-22 wpm at 16-20 dB SNR: letter error 3-15% with his tree decoder
+      (Table XXII, 4 samples). KAM (machine) 28-35 wpm: 1-10%.
+ 2. TSC report cited by Bell: A. Meisel et al., "Morse Laboratory Data Analysis Report", Technology Services
+    Corporation, May 1976 (the 55-sample hand-keyed study). NOT located online; likely the source of the real numbers.
+ 3. PDP-12 project, "Machine Recognition of hand-sent Morse Code using the PDP-12 Computer"
+    (alanpich.github.io/Morse-Code-Recognition/): three 10-15 min recordings; qualitative only in the page read:
+    character and word spaces have large variance and overlap heavily (cannot be separated by a time threshold);
+    dot/dash and symbol-space/other-space are separated by a wide gap; dash is longer when followed by a character or
+    word space; symbol-space shortens as the preceding dash lengthens; variance is NOT a speed-drift trend. Numbers
+    are in appendices not retrieved. Sub-pages (data-analysis/pulse-algorithm.html, space-algorithm.html) not read.
+ 4. C. R. Blair, "On Computer Transcription of Manual Morse", JACM (doi 10.1145/320986.320997): fetch blocked (403);
+    not read.
+ 5. AG1LE blog (2013) histograms of ~1800 symbols off-air on 7 MHz: dit ~0.1, dah ~0.3, element space ~0.1, char
+    space ~0.3, word space ~0.6-0.7 (normalised to a 10-dit cap); no spreads or raw data published. Bell's thesis is the
+    basis of AG1LE's fldigi Bayesian decoder (code on GitHub, not examined).
+IMPLICATIONS FOR timing_lab.py's sender model (currently independent lognormal jitter per element):
+ - add per-symbol instantaneous speed (random walk) rather than one drift per element;
+ - heavy-tailed (Laplacian) deviations, not Gaussian/lognormal;
+ - dependence on the previous symbol (space after dot less variable; space after long dash shorter; dash longer
+   before char/word space);
+ - char-gap and word-gap populations that overlap;
+ - per-operator parameter sets (key type: straight / bug / electronic).
+ Absolute parameter values must still be calibrated from real recordings (own, or the TSC report if obtainable).
+
+==============================================================================
+ADDENDUM D — VERIFICATION OF THE "RESEARCH LEADS" LIST; NUMERICAL DATA FOUND
+==============================================================================
+Goal: extract actual numeric hand-sent timing measurements. Result: almost none are publicly retrievable.
+ 1. FEL Industries / Coast Guard (E. William Merriam, "Preliminary analysis of automatic Morse code transcribers for
+    use in U.S. Coast Guard operations", 1984, NTIS; WorldCat oclc 11897588): EXISTS (catalogue record only). No
+    full text found (no CiteSeerX copy found). The finding list quoted in the request (dot/dash proportions
+    maintained, spacing less consistent, character-for-word space substitution, intra~inter-character confusion) is
+    UNVERIFIED by me. Title indicates an evaluation of commercial transcribers, not a timing-statistics study.
+ 2. Koch 1936 via Pierpont, "The Art & Skill of Radio-Telegraphy", ch. 29 (qsl.net/ng3p/haminfo/pierpont/c29.htm)
+    [V, read]: 4 competent operators (3 learned by sound, 1 from printed charts); letters b c v q f l h y z x sent by
+    hand key; 6 speeds ~20-80 characters/min; timed graphical record. Qualitative only: at ~5 wpm dits too short, dahs
+    > 3 dits, character spaces too long, intra-character spacing ~= 1 dit; below ~10 wpm three of four operators
+    deviate considerably; ~10 wpm nearly standard (letters slightly fast, letter spaces slightly long); >=12 wpm
+    consistent; individual peculiarities remain. NO numeric durations or ratios in the source as presented.
+    (Primary text: longislandcwclub.org KOCH-1936.pdf — not read.)
+ 3. MIT COMDEC / COMCO-1: a 1981 article (Communications of the ACM?) describes COMCO-1 transcriber + COMDEC
+    ("COmputerized Morse DECoder") from MIT LCS [per search result, not read]. Not found as a stats source. Earlier MIT
+    Lincoln Lab MAUDE (Gold, IRE Trans IT, March 1959): 90-95% correct on messages from 184 operators [per search
+    result]; Gold's paper is behind IEEE (not read).
+ 4. Blair, "On Computer Transcription of Manual Morse" (JACM): reports machines copy ~96.5% "correct" [per search
+    snippet]. Full text NOT obtained: ACM returned 403 and a further direct download attempt was blocked by the tool's
+    bot-check policy — I did not work around it. Could be obtained by the user via browser/library.
+ 5. Slayton et al. 2020, PLoS ONE, PMC6944339, read via Europe PMC XML [V]: NOT hand-sending; subjects listen to
+    "time" in Morse and TAP a six-element pattern. Gives the SHAPE of a variability model only: Weber coefficient =
+    slope of SD of tap time vs mean tap time; variability proportional to interval; Weber-speed effect (faster
+    production -> lower relative variability, 2x vs 0.5x, F1,16=12.585 p=.0027); musicians lower coefficient. Fitted
+    coefficient values are only in figures, not in the text. Produced speeds 1.6x and 0.7x when asked 2x/0.5x.
+ 6. Guenther 1973 (AFIT PDP-12 thesis; alanpich.github.io HTML copy) [V, 4 pages read]: numbers present are
+    algorithmic only: floating average over last N=8 dots/dashes; pulse (dot/dash) boundary slightly nearer the dot
+    average than the midpoint; dash maximum = 2x dash average; character spaces ~4x as frequent as word spaces in
+    English; 10 pulse/space categories reduced to 6 by following-space type. Equations and plots are images.
+    Raw data (Appendix B) not available. Original on DTIC (AD0786492 likely) — DTIC downloads return an HTML stub.
+ 7. Bell 1977 (see Addendum C): the only source with a usable generative structure (Laplacian per-symbol deviations,
+    instantaneous speed, previous-symbol dependence); its numeric basis is Meisel et al. TSC 1976 (not found).
+ 8. morseformer: 26 hand-keyed clips (g3ses, g6pz, 31 min) — audio and transcripts NOT in the repo (checked tree).
+MEASURED NUMBERS ACTUALLY RECOVERED (complete list): Koch speed points and "dah > 3 dit at ~5 wpm"; Bell 1.35% dot/dash
+error at optimum threshold (55 hand-keyed samples, TSC); PDP-12 N=8, 2x dash cap; AG1LE ~1800 symbols normalised
+(dit .1 dah .3 element space .1 char space .3 word space .6-.7); MAUDE 90-95%/184 operators; Blair 96.5%.
+NO per-operator means, SDs, correlations or distribution parameters were found. A simulator built now would have
+structure from the literature but invented parameters — it should be labelled that way.
+
+==============================================================================
+ADDENDUM E — HAND-SENT GENERATOR, RADIO LAYER AND TEST SUITE (~/Chat-Projects/cwlab)
+==============================================================================
+Built: handsim.py (timing layer), radio.py (receiver-side degradation), suite.py (162 cases = 18 operators
+[straight/bug/paddle x 10/18/28 wpm x 2 seeds] x 9 conditions), README.md. Numeric sender variances are [ASSUMED]
+except where tagged; calibration check: straight-key dot/dash error at speed-normalised threshold 1.24% vs Bell/TSC
+1.35% (bug 0.67%, paddle 0.0%); element/character-space error 3.3% (straight) i.e. spaces likely somewhat too variable.
+First suite run, OpenX6X00 front end (harness, floor 5 dB, no squelch): total CER 72.6%.
+ by condition: clean 39, snr15 39, snr6 42, snr0 49, qsb_deep(0.5 Hz Rayleigh) 55, qsb_fast(3 Hz) 159, qrm_adj 104,
+   qrn_crash 74, agc_band 93.
+ by key: straight 87, bug 71, paddle 59.   by speed: 10 wpm 138 (decoder floor is 10 wpm), 18 wpm 39, 28 wpm 40.
+Observations (relative, not absolute): (1) CER is nearly flat from clean to 6 dB SNR, so timing interpretation, not
+detection, limits accuracy; (2) 10 wpm hand-sent fails hard — DOT_MAX_MS=120 (10 wpm) clamps the speed estimate when a
+slow sender dips below 10; (3) fast fading (3 Hz Rayleigh) and an adjacent 22 wpm station 120 Hz away (at -6 dB)
+produce insertions/garbage (>100% CER); (4) paddle at 18/28 wpm is ~12% clean, so a share of errors is not sender
+timing at all (lock acquisition and the 1 s mute, first-character loss) — to be separated by a per-case error
+classification. These numbers inherit every [ASSUMED] parameter.
+
+==============================================================================
+ADDENDUM F — DECODER REVISION 1 (cwlab/dec1, packaged as ~/Chat-Projects/cwdecode)
+==============================================================================
+Source revision: OpenX6X00 eaf1974 src/cw_decoder (UNMODIFIED in ~/Chat-Projects/OpenX6X00). New revision is a copy.
+Changes: (1) soft_decoder.{h,cpp}: causal word-at-a-time likelihood decoder replaces ElementTimer->MorseText text path
+(ElementTimer kept only as a speed prior); online estimates of dit/dah (2-means), element/char/word gap centres (log
+2-means) and per-operator spread; beam search (200) over characters; word flush when the running gap reaches
+sqrt(cg*wg); blips/carriers/weak lone marks filtered; forced cut at 96 intervals only on a decided character boundary.
+(2) cw_lm.h: character bigram trained on 108k chars of W1AW/QST text (82 files from arrl.org), weight 0.5.
+(3) receiver.{h,cpp}: closed-interval accounting feeds SoftDecoder; element_timer.h: dot_ms() accessor.
+Front end (tone finder, lock, key detector) unchanged. Measured front-end interval accuracy on clean simulated audio:
+median error marks +2..+7.5 ms / gaps -2..-7.5 ms (equal and opposite), IQR +-1-2 ms, 0 gross mismatches.
+Results (suite.py, 162 cases, same audio): TOTAL CER original 72.6% -> rev1 41.8% (no-space 36.6%).
+ condition: clean 23.1, 15dB 23.5, 6dB 24.0, 0dB 25.8, qsb_deep 34.6, qsb_fast 87.6, qrm_adj 87.6, qrn 31.2, agc_band 39.0
+ key: straight 54.5, bug 38.1, paddle ~32; clean-only: straight 34.6, bug 20.2, paddle 13.6.
+ W1AW 20 wpm real (machine-sent) audio: 2.03% (original 2.03%).
+Floor check: timing-only decoding of the TRUE intervals (non-causal prototype, unigram prior) gives paddle 15%, bug 24%,
+straight 33% on the same generator, so rev1 is near what timing alone can deliver on these simulated operators; remaining
+gains need language modelling or a better front end. Tried and rejected: slow-speed mode (no gain), earlier word flush
+(splits words), flush at 0.9*wg or 1.25*sqrt(cg*wg) (worse), LM weights 1.0-1.5 (worse).
+NOT fixed (limits): fast Rayleigh fading, strong adjacent-station QRM, <10 wpm unverified, single-tone tracking, no
+squelch, up-to-a-word output delay, first word after lock unreliable, absolute CERs depend on assumed operator variances.
