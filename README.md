@@ -7,10 +7,20 @@ itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui))
 | Dir | What |
 |---|---|
 | `decoder/` | `cwdecode`: standalone Linux decoder (stdin f32 mono 4 kHz -> text). OpenX6X00 front end unchanged; the text stage is replaced by a word-at-a-time beam search with per-operator timing estimates and a letter-pair model. Needs liquid-dsp. |
-| `lab/` | `handsim.py` (human-fist generator), `radio.py` (fading/QRM/QRN/AGC), `suite.py` (162-case suite), a Python timing port, and the harnesses used for the measurements. |
+| `lab/` | `demo.sh` (end-to-end demo), `make_sample.py`, `apply_radio.py`, `compare.py`, `handsim.py` (human-fist generator), `radio.py` (fading/QRM/QRN/AGC), `suite.py` (162-case suite), a Python timing port, and the harnesses used for the measurements. |
 | `docs/openx6x00_decoder_analysis.txt` | Full source analysis plus addenda: upstream diff, literature on hand-sent code timing, generator, decoder rev 1. |
 | `tools/` | `build_lm.py`: rebuilds the decoder's bigram language-model table from ARRL W1AW/QST text. |
 | `results/` | Suite results JSON: original decoder vs rev 1. |
+
+## Try it: simulated operator -> radio channel -> decoder
+```
+cd decoder && ./build.sh && cd ../lab      # build once (needs liquid-dsp; LIQUID=<prefix> if not in /usr)
+./demo.sh --key straight --wpm 14 --cond qsb_deep
+```
+`demo.sh` generates hand-sent code (straight key, bug or paddle), passes it through a simulated radio condition
+(noise, fading, adjacent-station QRM, static crashes, band-pass + AGC), decodes it with the real OpenX6X00 receiver
+front end plus the rev-1 text stage, and prints what was sent, what was decoded, and the character error rate.
+Full step-by-step procedure, options and how to read the result: [docs/PROCEDURE.md](docs/PROCEDURE.md).
 
 ## Quick start
 ```

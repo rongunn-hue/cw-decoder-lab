@@ -6,3 +6,4 @@ __pycache__/
 *.wav
 lab/h_*
 lab/harness
+lab/demo_out/
