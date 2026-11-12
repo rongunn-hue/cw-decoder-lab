@@ -62,6 +62,21 @@ def sample_operator(rng, key_type=None, wpm=None, sloppiness=None):
                 dash_end_stretch=0.08,                # [PDP12] dash longer before char/word space (+8%) value [ASSUMED]
                 space_after_dash_k=0.35)              # [PDP12] space shortens as preceding dash lengthens, k [ASSUMED]
 
+# [HYPOTHESIS: user] character fluency: frequently used characters are sent more smoothly than rare ones.
+# English letter frequencies in percent (standard table; digits/punctuation treated as rare, 0.2 %).
+ENGLISH_FREQ = dict(E=12.7, T=9.1, A=8.2, O=7.5, I=7.0, N=6.7, S=6.3, H=6.1, R=6.0, D=4.3, L=4.0, C=2.8, U=2.8, M=2.4, W=2.4,
+                    F=2.2, G=2.0, Y=2.0, P=1.9, B=1.5, V=1.0, K=0.8, J=0.15, X=0.15, Q=0.10, Z=0.07)
+_FLU_NORM = {}
+def fluency_scale(ch, h):
+    """Multiplier on timing-deviation scale for the marks and element spaces INSIDE character ch. h=0: none (default).
+    Raw = (2%/f)^(0.17 h), clipped 0.6-1.8 (exponent 0.17 is a [HYPOTHESIS] size, not a measurement), then divided by the
+    frequency-weighted geometric mean over English letters so the AVERAGE sloppiness is unchanged: only its distribution
+    across characters moves (h=1: E ~0.84x ... Q/Z ~2.0x of the operator's normal scale)."""
+    raw = lambda c: float(np.clip((2.0 / ENGLISH_FREQ.get(c, 0.2)) ** (0.17 * h), 0.6, 1.8))
+    if h not in _FLU_NORM:
+        tot = sum(ENGLISH_FREQ.values()); _FLU_NORM[h] = math.exp(sum(f * math.log(raw(c)) for c, f in ENGLISH_FREQ.items()) / tot)
+    return raw(ch) / _FLU_NORM[h]
+
 def laplace(rng, b):
     return float(rng.laplace(0.0, b))                 # [BELL] double-sided exponential deviation
 
@@ -79,29 +94,30 @@ def send(text, op, rng):
         nonlocal s
         s = op['speed_ar'] * s + rng.normal(0, op['speed_sd'])
         return base * math.exp(s)
-    def dev(b):
+    h = op.get('fluency', 0.0)
+    def dev(b, m=1.0):
         nonlocal dev_prev
-        d = rho * dev_prev + math.sqrt(1 - rho * rho) * laplace(rng, b * op['var_scale'])
+        d = rho * dev_prev + math.sqrt(1 - rho * rho) * laplace(rng, b * op['var_scale'] * m)
         dev_prev = d
         return d
     for wi, w in enumerate(words):
         for chi, ch in enumerate(w):
-            code = MORSE[ch]
+            code = MORSE[ch]; fm = fluency_scale(ch, h) if h else 1.0
             if rng.random() < op['speed_step_p']:
                 s += rng.normal(0, op['speed_step_sd'])
             for ei, e in enumerate(code):
                 u = unit()
                 last = ei == len(code) - 1
                 if e == '.':
-                    d = dev(op['b']['b_dit']); dur = u * op['dit_scale'] * math.exp(d); kind = 'dit'
+                    d = dev(op['b']['b_dit'], fm); dur = u * op['dit_scale'] * math.exp(d); kind = 'dit'
                 else:
-                    d = dev(op['b']['b_dah']); dur = u * op['ratio'] * math.exp(d); kind = 'dah'
+                    d = dev(op['b']['b_dah'], fm); dur = u * op['ratio'] * math.exp(d); kind = 'dah'
                     if last: dur *= 1 + op['dash_end_stretch']
                     last_dah_dev = d
                 ev.append(dict(mark=True, dur=max(dur, 15.0), kind=kind, ci=ci))
                 if not last:
                     b = op['b']['b_es'] * (0.6 if e == '.' else 1.0)    # [BELL] less variable after a dot
-                    d2 = dev(b)
+                    d2 = dev(b, fm)
                     dur = u * op['es'] * math.exp(d2)
                     if e == '-': dur *= math.exp(-op['space_after_dash_k'] * last_dah_dev)   # [PDP12]
                     if rng.random() < op['hesitate_p']: dur += u * rng.uniform(1.0, 3.0)
@@ -180,9 +196,10 @@ def stats(ev, op):
         out['wg_shorter_than_cg_p90'] = float((wg < np.percentile(cg, 90)).mean())
     return out
 
-def generate(seed, key_type=None, wpm=None, snr_db=30.0, n_words=14, **radio):
+def generate(seed, key_type=None, wpm=None, snr_db=30.0, n_words=14, fluency=0.0, **radio):
     rng = np.random.default_rng(seed)
     op = sample_operator(rng, key_type, wpm)
+    op['fluency'] = fluency     # [HYPOTHESIS: user] 0 = off (default; output identical to before)
     text = make_text(rng, n_words)
     ev = send(text, op, rng)
     audio, t0 = render(ev, snr_db=snr_db, rng=rng, **radio)

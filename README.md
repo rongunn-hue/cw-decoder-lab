@@ -1,5 +1,12 @@
 # cw-decoder-lab
 
+> **Status: simulation only. This is all smoke and mirrors until real human-sent code is tested.** Every accuracy number in this
+> repo comes from a simulated operator (partly assumed timing statistics) sent through a simulated radio channel, plus one
+> machine-sent W1AW recording. No real hand-sent recording with known text has been tested. The numbers are useful for comparing
+> decoders against each other; they are not a measure of real-world accuracy. Recordings of real hand-sent code with known text
+> are the most valuable contribution.
+
+
 Analysis, a hand-sent-Morse test generator, and an improved standalone decoder, built from the CW
 decoder in [Guru-RF/OpenX6X00](https://github.com/Guru-RF/OpenX6X00) (Xiegu X6100 alternative firmware;
 itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui)).
@@ -16,6 +23,7 @@ itself derived from [gdyuldin/x6100_gui](https://github.com/gdyuldin/x6100_gui))
 - [docs/VERSIONS.md](docs/VERSIONS.md): which decoder versions exist (upstream, original OpenX6X00, rev 1) and exactly what rev 1 changes.
 - [docs/CHANGES.md](docs/CHANGES.md): exactly what rev 1 changed (algorithm, parameters, edits, fixes, what was tried and dropped).
 - [docs/RESULTS.md](docs/RESULTS.md): summary of all test results (by tier, condition and key type) with every caveat.
+- [docs/FLUENCY.md](docs/FLUENCY.md): an unvalidated hypothesis (common characters are sent more smoothly), its simulator switch, an analysis script for real recordings, and what it would do to the decoder.
 - [docs/PROCEDURE.md](docs/PROCEDURE.md): how to run the demo and the suite yourself.
 - [docs/openx6x00_decoder_analysis.txt](docs/openx6x00_decoder_analysis.txt): full source analysis and research notes.
 

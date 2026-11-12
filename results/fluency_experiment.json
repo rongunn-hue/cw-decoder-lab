@@ -1,0 +1,101 @@
+{
+ "0.0": {
+  "tab": {
+   "middle": [
+    283,
+    3395
+   ],
+   "all letters+digits": [
+    1094,
+    15214
+   ],
+   "key:straight": [
+    481,
+    4942
+   ],
+   "frequent": [
+    560,
+    8768
+   ],
+   "rare": [
+    251,
+    3051
+   ],
+   "key:bug": [
+    424,
+    5138
+   ],
+   "key:paddle": [
+    189,
+    5134
+   ]
+  },
+  "insertions": 885
+ },
+ "0.5": {
+  "tab": {
+   "middle": [
+    335,
+    3395
+   ],
+   "all letters+digits": [
+    1314,
+    15214
+   ],
+   "key:straight": [
+    602,
+    4942
+   ],
+   "frequent": [
+    605,
+    8768
+   ],
+   "rare": [
+    374,
+    3051
+   ],
+   "key:bug": [
+    527,
+    5138
+   ],
+   "key:paddle": [
+    185,
+    5134
+   ]
+  },
+  "insertions": 933
+ },
+ "1.0": {
+  "tab": {
+   "middle": [
+    400,
+    3395
+   ],
+   "all letters+digits": [
+    1634,
+    15214
+   ],
+   "key:straight": [
+    800,
+    4942
+   ],
+   "frequent": [
+    622,
+    8768
+   ],
+   "rare": [
+    612,
+    3051
+   ],
+   "key:bug": [
+    648,
+    5138
+   ],
+   "key:paddle": [
+    186,
+    5134
+   ]
+  },
+  "insertions": 1054
+ }
+}

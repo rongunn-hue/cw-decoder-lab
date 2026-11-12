@@ -1,5 +1,7 @@
 # Test results summary and caveats
 
+> **All results below are simulation only. Treat them as unvalidated until real human-sent code with known text is tested.**
+
 Nov 2026 run, `suite.py run --tier all`, 684 cases (76 simulated operators x 9 radio conditions, 27,774 reference characters
 after dropping each case's first word). Raw data: `results/tiers_all_original.json`, `results/tiers_all_rev1.json`.
 "original" = OpenX6X00 decoder unchanged; "rev 1" = `decoder/` (see `VERSIONS.md`). Both receive identical audio.
